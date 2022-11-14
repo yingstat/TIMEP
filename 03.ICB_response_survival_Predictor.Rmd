@@ -1,0 +1,733 @@
+---
+title: "Predicting ICB response and survival from tumor immune microenvironment learned from the blood"
+author: "Yingying Cao and Tiangen Chang"
+output: 
+  rmarkdown::html_vignette:
+    toc: true
+    toc_depth: 2
+vignette: >
+  %\VignetteIndexEntry{GSE139324_HNSC}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+<!-- ```{r} -->
+<!-- # # clear all objects including hidden objects -->
+<!-- # rm(list = ls(all.names = TRUE))  -->
+<!-- # # free up memory and report the memory usage -->
+<!-- # gc() -->
+<!-- ``` -->
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = FALSE,
+                      comment = FALSE, 
+                      warning = FALSE, 
+                      message = FALSE)
+require(ggplot2)
+ggplot2::theme_set(new = theme_bw(base_size = 12)) # sets the theme and axis font size
+```
+
+
+# Aims:
+
+- predicting HNSCC patient survival/ICB response from tumor immune cell fractions (ICFs), which are either predicted from blood scRNA-seq or deconvoluted from tumor bulk RNAseq
+
+
+# load required package
+```{r}
+library(survival)
+library(survminer)
+library(ggplot2)
+library(RColorBrewer)
+library(glmnet)
+library(rlang)
+library(pROC)
+library(verification)
+```
+
+# set the color scale
+```{r}
+my.cols <- c("#7CD5C8FF", "#507D41FF", "#DF8F44FF", "#6A6599FF", "#CB7C77FF", "#6B42C8FF",
+             "#C9D73DFF", "#C555CBFF", "#AED688FF", "#502E71FF", "#C49A3FFF",
+             "#42B540FF", "#0099B4FF", "#925E9FFF", 
+             "#FDAF91FF", "#AD002AFF", "#00468BFF", "#ED0000FF",
+             "#6A7DC9FF", "#D7652DFF", 
+             "#CF4C8BFF", "#5D8D9CFF", "#722E41FF", "#C8B693FF", "#C5383CFF", "#79AF97FF", "#68D359FF")
+feature.pal = rev(colorRampPalette(brewer.pal(11,"Spectral"))(50))
+```
+
+# Set directories & parameters
+```{r}
+data_dir <- "./input/"
+pred_fig_dir <- "./output/"
+pred_table_dir <- "./output/"
+```
+
+# load data
+```{r}
+cellTypes = c('B.cells.memory', 'T.cells.follicular.helper', 'T.cells.regulatory..Tregs.')
+
+# deconvoluted TCGA immune cell fractions (ICFs) by CIBERSORTx
+TCGA_ICF_df = read.csv('./input/TCGA_ICFs_Deconvolution_results.csv', header=TRUE, row.names = 1)
+TCGA_ICF_df = TCGA_ICF_df[1:(dim(TCGA_ICF_df)[2]-3)]
+TCGA_ICF_df = TCGA_ICF_df[cellTypes]
+TCGA_clinicalInfo_df = read.csv('./input/TCGA_clinicalInfo.csv', header=TRUE, row.names = 1)
+# deconvoluted GSE159067 immune cell fractions (ICFs) by CIBERSORTx
+GSE159067_ICF_df = read.csv('./input/GSE159067_ICFs_Deconvolution_result.csv', header=TRUE, row.names = 1)
+GSE159067_ICF_df = GSE159067_ICF_df[1:(dim(GSE159067_ICF_df)[2]-3)]
+GSE159067_ICF_df = GSE159067_ICF_df[cellTypes]
+GSE159067_clinicalInfo_df = read.csv('./input/GSE159067_clinicInfo.csv', header=TRUE, row.names = 1)
+
+##### Tumor ICFs predicted from blood scRNAseq (GSE200996; Luoma et al, 2022, Cell)
+GSE200996_ICF_df = read.csv('./output/ICF_Predicted_TestData.csv', header=TRUE, row.names = 1)
+# GSE200996_ICF_df = read.csv('./input/Predicted_study2_Tumor_RCA_res1000.csv', header=TRUE, row.names = 1)
+samplesNA = rownames(GSE200996_ICF_df)
+GSE200996_clinicalInfo_df = read.csv('./input/GSE200996_PatientOutcome.csv', header=TRUE, row.names = 1)
+GSE200996_clinicalInfo_df = GSE200996_clinicalInfo_df[samplesNA,]
+GSE200996_blood_ICF_df = read.csv('./input/PBMC_clinical_info_trainAndTest.csv', header=TRUE, row.names = 1)
+GSE200996_blood_ICF_df = GSE200996_blood_ICF_df[samplesNA,1:13]
+```
+
+# identify ICF ratios that can predict ICB from GSE159067 deconvoluted bulk RNAseq data
+```{r}
+GSE159067_ICB_R_df = GSE159067_clinicalInfo_df[,'best.response.on.immunotherapy..recist..ch1',drop=FALSE]
+colnames(GSE159067_ICB_R_df) = c('ICB_R')
+GSE159067_ICB_R_df$ICB_R = replace(GSE159067_ICB_R_df$ICB_R,GSE159067_ICB_R_df$ICB_R=='PD',0)
+GSE159067_ICB_R_df$ICB_R = replace(GSE159067_ICB_R_df$ICB_R,GSE159067_ICB_R_df$ICB_R=='SD',0)
+GSE159067_ICB_R_df$ICB_R = replace(GSE159067_ICB_R_df$ICB_R,GSE159067_ICB_R_df$ICB_R=='CR',1)
+GSE159067_ICB_R_df$ICB_R = replace(GSE159067_ICB_R_df$ICB_R,GSE159067_ICB_R_df$ICB_R=='PR',1)
+GSE159067_ICB_R_df$ICB_R = as.numeric(GSE159067_ICB_R_df$ICB_R)
+
+################################## ICF ratio in form of (C1+/-C2) / (C3+C4) correlation with ICB ##################################
+GSE159067_ICF_df2 = GSE159067_ICF_df
+for (cell_i in 1:length(cellTypes)){
+  cn_1 = cellTypes[cell_i]
+  for (mm in c(-1,0,1)){
+      if (cell_i==length(cellTypes)){
+        next
+      }
+      for (cell_j in (cell_i+1):length(cellTypes)){
+        cn_2 = cellTypes[cell_j]
+        value_upper = GSE159067_ICF_df[cn_1] + GSE159067_ICF_df[cn_2]*mm
+        for (cell_i2 in 1:length(cellTypes)){
+          cn_12 = cellTypes[cell_i2]
+          for (mm2 in c(0,1)){
+            if (cell_i2==length(cellTypes)){
+              next
+            }
+              for (cell_j2 in (cell_i2+1):length(cellTypes)){
+                cn_22 = cellTypes[cell_j2]
+                value_lower = GSE159067_ICF_df[cn_12] + GSE159067_ICF_df[cn_22]*mm2 + 0.000001
+                #value_lower[value_lower<=0] = 0.0001
+                if (mm > 0.05){
+                  colNA_temp1 = paste0(cn_1,'.plus.',cn_2)
+                }else if (abs(mm) < 0.05){
+                  colNA_temp1 = paste0(cn_1)
+                }else{
+                  colNA_temp1 = paste0(cn_1,'.minus.',cn_2)
+                }
+                if (mm2 > 0.05){
+                  colNA_temp2 = paste0(cn_12,'.plus.',cn_22)
+                }else if (abs(mm2) < 0.05){
+                  colNA_temp2 = paste0(cn_12)
+                }else{
+                  colNA_temp2 = paste0(cn_12,'.minus.',cn_22)
+                }
+                if (colNA_temp1==colNA_temp2){
+                  next
+                }
+                colNA_temp = paste0(colNA_temp1,'2',colNA_temp2)
+                GSE159067_ICF_df2[colNA_temp] = value_upper/value_lower
+              }
+          }
+        }
+      }
+  }
+}
+
+cellsNA = colnames(GSE159067_ICF_df2)
+cancerData=data.frame(GSE159067_ICB_R_df$ICB_R,GSE159067_ICF_df2)
+result_df = data.frame(col1 = character(), col2 = numeric(), col3 = numeric())
+colnames(result_df) = c('ICFR', 'AUC_ICBR', 'p_val')
+for (cn_i in 1:length(cellsNA)){
+  cn = cellsNA[cn_i]
+  SCORE = GSE159067_ICF_df2[[cn]]
+  auc_p=roc.area(GSE159067_ICB_R_df$ICB_R, SCORE)
+  auc_ICBR = auc_p$A
+  p_ICBR = auc_p$p.value
+  result_df[cn_i,]=c(cn, auc_ICBR, p_ICBR)
+}
+result_df$AUC_ICBR = as.numeric(result_df$AUC_ICBR)
+result_df_ordered = result_df[order(result_df$AUC_ICBR, decreasing = TRUE),]
+write.csv(result_df_ordered,file = "./output/ICFratio_tumor_predict_ICBR_GSE159067.csv")
+
+
+ICFR_top = c('B.cells.memory.minus.T.cells.regulatory..Tregs.2B.cells.memory.plus.T.cells.regulatory..Tregs.', 'B.cells.memory.minus.T.cells.regulatory..Tregs.2T.cells.follicular.helper', 'B.cells.memory.minus.T.cells.regulatory..Tregs.2T.cells.follicular.helper.plus.T.cells.regulatory..Tregs.')
+
+ICF_results_df = data.frame(matrix(0,1,3))
+colnames(ICF_results_df) = c('cn','AUC', 'cutoff')
+for (cn_i in 1:length(ICFR_top)){
+  cn = ICFR_top[cn_i]
+  cancerData=data.frame(GSE159067_ICB_R_df,GSE159067_ICF_df2[cn])
+  AUC_p = roc.area(cancerData[,1], cancerData[,2])
+  auc_val = AUC_p$A
+  pval = AUC_p$p.value
+  my_roc <- roc(cancerData[,1], cancerData[,2])
+  cutoff = coords(my_roc, "best", ret = "threshold", best.method="youden") # youden: max(sensitivities + specificities)
+  ICF_results_df[cn_i,]=c(cn, round(auc_val,4), round(cutoff,4)) # round(auc_value_test,2), 
+  
+  title_str = paste0('ROC_ICBR_GSE159067_Top', cn_i)
+  roc_ICBR=roc(cancerData[,1], cancerData[,2]) #AUC score
+  g = ggroc(roc_ICBR, colour = 'black', size = 1, legacy.axes = TRUE)  +
+       annotate("text", x = .6, y = .15, label = paste("AUC =", round(auc_val,2),"\np =", round(pval,3))) 
+  g = g + theme_classic() +
+    theme(
+      axis.text.x = element_text(color="black"),
+      axis.text.y = element_text(color="black"),
+      axis.ticks = element_line(color = "black")
+    ) + xlab("FPR") + ylab("TPR") + 
+      geom_segment(aes(x = 0, xend = 1, y = 0, yend = 1), color="darkgray", linetype="dashed")
+  png(file=paste(pred_fig_dir,title_str,".png",sep = ""),res=200,width=400, height=350) # width=700, height=600
+  print(g, newpage = FALSE)
+  dev.off()
+}
+```
+
+# prediction of GEOGSE159067 (RNA-seq data) survival (OS/PFS) by ICF ratio
+```{r}
+clinical_info = GSE159067_clinicalInfo_df
+OS_STATUS = clinical_info$os..event..ch1
+OS_TIME = clinical_info$os..month..ch1
+PFS_STATUS = clinical_info$pfs..event..ch1
+PFS_TIME = clinical_info$pfs..month..ch1
+for (cn_i in 1:length(ICFR_top)){
+  cn = ICFR_top[cn_i]
+  cancerData=data.frame(GSE159067_ICB_R_df,GSE159067_ICF_df2[cn])
+  Score_Pred = cancerData[,2]
+  
+  Score=Score_Pred
+  exp_cutoff = quantile(Score_Pred, 0.9)
+  Score[Score_Pred>exp_cutoff]="High"
+  Score[Score_Pred<=exp_cutoff]="Low"
+  
+  ##### OS
+  cancerData=data.frame(Score,OS_TIME,OS_STATUS)
+  sfit <- survfit(Surv(OS_TIME, OS_STATUS) ~ Score, data=cancerData)
+  scox <- coxph(Surv(OS_TIME, OS_STATUS)~Score, data=cancerData)
+  scox_coef = summary(scox)$coefficients
+  HR_value = scox_coef[2] # hazard ratio
+  Z_value=scox_coef[4]
+  P_value=scox_coef[5]
+  print(paste(c('OS', 'GSE159067', cn, round(P_value,5), round(HR_value,2)), collapse= " "))
+  ##### plot
+  fontSize = 13
+  N <- length(unique(Score))
+  survp=ggsurvplot(
+    sfit,
+    data = cancerData,
+    size = 1,                 # change line size
+    palette =
+      c("#E7B800", "#2E9FDF"),# custom color palettes
+    conf.int = TRUE,          # Add confidence interval
+    pval = TRUE,              # Add p-value
+    pval.coord = c(40*0.7, 0.75),
+    xlim = c(0,40),
+    ylim=c(0,1),
+    xlab = "Time in months",
+    break.time.by = 10,
+    risk.table=TRUE,
+    risk.table.height = 0.29, # Useful to change when you have multiple groups
+    risk.table.pos="out",
+    risk.table.col="black",
+    risk.table.y.text = FALSE,
+    tables.y.text = FALSE, 
+    tables.theme = theme_cleantable(),
+    legend.labs =c("High", "Low"),    # Change legend labels
+    legend.title="IGS",
+    legend = c(0.65, 1), # legend relative position
+    font.main = c(fontSize),
+    font.caption = c(fontSize),
+    font.legend = c(fontSize),
+    font.tickslab = c(fontSize),
+    font.x = c(fontSize),
+    font.y = c(fontSize),
+    ggtheme = theme_classic2(base_size=fontSize, base_family = "Arial"),
+             font.family = "Arial"
+  )+ 
+    guides(colour = guide_legend(nrow = 1)) # legend in rows
+  cn_now = paste0('Top',cn_i)
+  title_str = paste0('GSE159067_OS_',cn_now)
+  png(file=paste(pred_fig_dir,title_str,".png",sep = ""),res=300,width=1100, height=900) # width=600, height=350
+  print(survp, newpage = FALSE)
+  dev.off()
+  
+  ##### PFS
+  cancerData=data.frame(Score,PFS_TIME,PFS_STATUS)
+  sfit <- survfit(Surv(PFS_TIME, PFS_STATUS) ~ Score, data=cancerData)
+  scox <- coxph(Surv(PFS_TIME, PFS_STATUS)~Score, data=cancerData)
+  scox_coef = summary(scox)$coefficients
+  HR_value = scox_coef[2] # hazard ratio
+  Z_value=scox_coef[4]
+  P_value=scox_coef[5]
+  print(paste(c('PFS', 'GSE159067', cn, round(P_value,5), round(HR_value,2)), collapse= " "))
+  ##### plot
+  fontSize = 13
+  N <- length(unique(Score))
+  survp=ggsurvplot(
+    sfit,
+    data = cancerData,
+    size = 1,                 # change line size
+    palette =
+      c("#E7B800", "#2E9FDF"),# custom color palettes
+    conf.int = TRUE,          # Add confidence interval
+    pval = TRUE,              # Add p-value
+    pval.coord = c(40*0.7, 0.75),
+    xlim = c(0,40),
+    ylim=c(0,1),
+    xlab = "Time in months",
+    break.time.by = 10,
+    risk.table=TRUE,
+    risk.table.height = 0.29, # Useful to change when you have multiple groups
+    risk.table.pos="out",
+    risk.table.col="black",
+    risk.table.y.text = FALSE,
+    tables.y.text = FALSE, 
+    tables.theme = theme_cleantable(),
+    legend.labs =c("High", "Low"),    # Change legend labels
+    legend.title="IGS",
+    legend = c(0.65, 1), # legend relative position
+    font.main = c(fontSize),
+    font.caption = c(fontSize),
+    font.legend = c(fontSize),
+    font.tickslab = c(fontSize),
+    font.x = c(fontSize),
+    font.y = c(fontSize),
+    ggtheme = theme_classic2(base_size=fontSize, base_family = "Arial"),
+             font.family = "Arial"
+  )+ 
+    guides(colour = guide_legend(nrow = 1)) # legend in rows
+  cn_now = paste0('Top',cn_i)
+  title_str = paste0('GSE159067_PFS_',cn_now)
+  png(file=paste(pred_fig_dir,title_str,".png",sep = ""),res=300,width=1100, height=900) # width=600, height=350
+  print(survp, newpage = FALSE)
+  dev.off()
+  
+}
+```
+
+# predict ICB response by tumor ICF ratios (predicted from the blood) (GSE200996; Luoma et al Cell 2022)
+```{r}
+PFS_event_df = GSE200996_clinicalInfo_df[,'Progression.free.survival.event..recurrence..death..new.primary.',drop=FALSE]
+colnames(PFS_event_df) = c('PFS_event')
+
+alive_DF_df = GSE200996_clinicalInfo_df[,'Alive.and.disease.free.at.end.of.the.follow.up.interval',drop=FALSE]
+colnames(alive_DF_df) = c('alive_DF')
+
+died_df = GSE200996_clinicalInfo_df[,'Died',drop=FALSE]
+colnames(died_df) = c('died_DF')
+
+ICB_R_df = GSE200996_clinicalInfo_df[,'RECIST.response.excluding.non.measurable',drop=FALSE]
+colnames(ICB_R_df) = c('ICB_R')
+ICB_R_df[grepl('stable/progress', ICB_R_df$ICB_R),] = 0
+ICB_R_df[grepl('response', ICB_R_df$ICB_R),] = 1
+ICB_R_df[grepl('not measurable', ICB_R_df$ICB_R),] = NA
+ICB_R_df$ICB_R = as.numeric(ICB_R_df$ICB_R)
+
+Vol_R_df = GSE200996_clinicalInfo_df[,'Volumetric.response',drop=FALSE]
+colnames(Vol_R_df) = c('Vol_R')
+Vol_R_df[grepl('no', Vol_R_df$Vol_R),] = 0
+Vol_R_df[grepl('yes', Vol_R_df$Vol_R),] = 1
+Vol_R_df$Vol_R = as.numeric(Vol_R_df$Vol_R)
+
+pathologic_downstaging_df = GSE200996_clinicalInfo_df[,'Clinical.to.pathologic.downstaging',drop=FALSE]
+colnames(pathologic_downstaging_df) = c('pathologic_downstaging')
+colnames(pathologic_downstaging_df) = c('downstaging')
+pathologic_downstaging_df[grepl('no', pathologic_downstaging_df$downstaging),] = 0
+pathologic_downstaging_df[grepl('yes', pathologic_downstaging_df$downstaging),] = 1
+pathologic_downstaging_df$downstaging = as.numeric(pathologic_downstaging_df$downstaging)
+
+Patho_R_df = GSE200996_clinicalInfo_df[,'Pathological.response..',drop=FALSE] # continuous variable
+colnames(Patho_R_df) = c('Patho_R')
+Patho_R_df['Patho_NCR'] = (Patho_R_df['Patho_R']>=90)+0
+Patho_R_df['Patho_minR'] = (Patho_R_df['Patho_R']>=10)+0
+
+cellsNA = c("Memory.space.B.space.cells", "Regulatory.space.T.space.cells", "Helper.space.T.space.cells")
+################################## ICF ratio correlation with ICB ##################################
+GSE200996_ICF_df2 = GSE200996_ICF_df[cellsNA]
+ICFR_top = c('Memory.space.B.space.cells.minus.Regulatory.space.T.space.cells2Memory.space.B.space.cells.plus.Regulatory.space.T.space.cells', 'Memory.space.B.space.cells2Helper.space.T.space.cells', 'Memory.space.B.space.cells.minus.Regulatory.space.T.space.cells2Regulatory.space.T.space.cells.plus.Helper.space.T.space.cells')
+GSE200996_ICF_df2[ICFR_top[1]] = (GSE200996_ICF_df2[cellsNA[1]] - GSE200996_ICF_df2[cellsNA[2]]) / (GSE200996_ICF_df2[cellsNA[1]] + GSE200996_ICF_df2[cellsNA[2]] + 0.000001)
+GSE200996_ICF_df2[ICFR_top[2]] = (GSE200996_ICF_df2[cellsNA[1]] - GSE200996_ICF_df2[cellsNA[2]]) / (GSE200996_ICF_df2[cellsNA[3]] + 0.000001)
+GSE200996_ICF_df2[ICFR_top[3]] = (GSE200996_ICF_df2[cellsNA[1]] - GSE200996_ICF_df2[cellsNA[2]]) / (GSE200996_ICF_df2[cellsNA[2]] + GSE200996_ICF_df2[cellsNA[3]] + 0.000001)
+GSE200996_ICF_df2 = GSE200996_ICF_df2[ICFR_top]
+
+for (cn_i in 1:length(ICFR_top)){
+  cn = ICFR_top[cn_i]
+  cancerData=data.frame(ICB_R_df,GSE200996_ICF_df2[cn])
+  cancerData2=data.frame(Vol_R_df,GSE200996_ICF_df2[cn])
+  cancerData5=data.frame(pathologic_downstaging_df[['downstaging']],GSE200996_ICF_df2[cn])
+  cancerData6=data.frame(Patho_R_df[['Patho_NCR']],GSE200996_ICF_df2[cn])
+  cancerData7=data.frame(Patho_R_df[['Patho_minR']],GSE200996_ICF_df2[cn])
+  # ICB RECIST response
+  AUC_p = roc.area(cancerData[,1], cancerData[,2])
+  auc_value = AUC_p$A
+  pval = AUC_p$p.value
+  # Volumetric response
+  AUC_p2 = roc.area(cancerData2[,1], cancerData2[,2])
+  auc_value2 = AUC_p2$A
+  pval2 = AUC_p2$p.value
+  # pathological downstaging response
+  AUC_p5 = roc.area(cancerData5[,1], cancerData5[,2])
+  auc_value5 = AUC_p5$A
+  pval5 = AUC_p5$p.value
+  # pathological near-complete response
+  AUC_p6 = roc.area(cancerData6[,1], cancerData6[,2])
+  auc_value6 = AUC_p6$A
+  pval6 = AUC_p6$p.value
+  # pathological min-response response
+  AUC_p7 = roc.area(cancerData7[,1], cancerData7[,2])
+  auc_value7 = AUC_p7$A
+  pval7 = AUC_p7$p.value
+  #print(paste(cn, round(auc_value,2), round(auc_value2,2), round(auc_value3,2), round(auc_value4,2), round(auc_value5,2), round(auc_value6,2), round(auc_value7,2)))
+  # plot ICB RECIST response ROC
+  title_str = paste0('ROC_RECIST_R_GSE200996_Top', cn_i)
+  roc_RECIST_R=roc(cancerData[,1], cancerData[,2]) #AUC score
+  g = ggroc(roc_RECIST_R, colour = 'black', size = 1, legacy.axes = TRUE)  +
+       annotate("text", x = .6, y = .15, label = paste("AUC =", round(auc_value,2), "\np =", round(pval,2)))
+  g = g + theme_classic() +
+    theme(
+      axis.text.x = element_text(color="black"),
+      axis.text.y = element_text(color="black"),
+      axis.ticks = element_line(color = "black")
+    ) + xlab("FPR") + ylab("TPR") + 
+      geom_segment(aes(x = 0, xend = 1, y = 0, yend = 1), color="darkgray", linetype="dashed")
+  png(file=paste(pred_fig_dir,title_str,".png",sep = ""),res=200,width=400, height=350) # width=700, height=600
+  print(g, newpage = FALSE)
+  dev.off()
+  # plot Volumetric response ROC
+  title_str2 = paste0('ROC_Volumetric_R_GSE200996_Top', cn_i)
+  roc_VolR=roc(cancerData2[,1], cancerData2[,2]) #AUC score
+  g = ggroc(roc_VolR, colour = 'black', size = 1, legacy.axes = TRUE)  +
+       annotate("text", x = .6, y = .15, label = paste("AUC =", round(auc_value2,2), "\np =", round(pval2,2)))
+  g = g + theme_classic() +
+    theme(
+      axis.text.x = element_text(color="black"),
+      axis.text.y = element_text(color="black"),
+      axis.ticks = element_line(color = "black")
+    ) + xlab("FPR") + ylab("TPR") + 
+      geom_segment(aes(x = 0, xend = 1, y = 0, yend = 1), color="darkgray", linetype="dashed")
+  png(file=paste(pred_fig_dir,title_str2,".png",sep = ""),res=200,width=400, height=350) # width=700, height=600
+  print(g, newpage = FALSE)
+  dev.off()
+  # plot pathological downstaging response ROC
+  title_str5 = paste0('ROC_downstaging_R_GSE200996_Top', cn_i)
+  roc_downstaging_R=roc(cancerData5[,1], cancerData5[,2]) #AUC score
+  g = ggroc(roc_downstaging_R, colour = 'black', size = 1, legacy.axes = TRUE)  +
+       annotate("text", x = .6, y = .15, label = paste("AUC =", round(auc_value5,2), "\np =", round(pval5,2)))
+  g = g + theme_classic() +
+    theme(
+      axis.text.x = element_text(color="black"),
+      axis.text.y = element_text(color="black"),
+      axis.ticks = element_line(color = "black")
+    ) + xlab("FPR") + ylab("TPR") + 
+      geom_segment(aes(x = 0, xend = 1, y = 0, yend = 1), color="darkgray", linetype="dashed")
+  png(file=paste(pred_fig_dir,title_str5,".png",sep = ""),res=200,width=400, height=350) # width=700, height=600
+  print(g, newpage = FALSE)
+  dev.off()
+  # plot Pathological NearComplete response ROC
+  title_str6 = paste0('ROC_Pathological_NearCompleteR_GSE200996_Top', cn_i)
+  roc_Pathological_NearCompleteR=roc(cancerData6[,1], cancerData6[,2]) #AUC score
+  g = ggroc(roc_Pathological_NearCompleteR, colour = 'black', size = 1, legacy.axes = TRUE)  +
+       annotate("text", x = .6, y = .15, label = paste("AUC =", round(auc_value6,2), "\np =", round(pval6,2)))
+  g = g + theme_classic() +
+    theme(
+      axis.text.x = element_text(color="black"),
+      axis.text.y = element_text(color="black"),
+      axis.ticks = element_line(color = "black")
+    ) + xlab("FPR") + ylab("TPR") + 
+      geom_segment(aes(x = 0, xend = 1, y = 0, yend = 1), color="darkgray", linetype="dashed")
+  png(file=paste(pred_fig_dir,title_str6,".png",sep = ""),res=200,width=400, height=350) # width=700, height=600
+  print(g, newpage = FALSE)
+  dev.off()
+  # plot Pathological min response ROC
+  title_str7 = paste0('ROC_Pathological_minR_GSE200996_Top', cn_i)
+  roc_Pathological_minR=roc(cancerData7[,1], cancerData7[,2]) #AUC score
+  g = ggroc(roc_Pathological_minR, colour = 'black', size = 1, legacy.axes = TRUE)  +
+       annotate("text", x = .6, y = .15, label = paste("AUC =", round(auc_value7,2), "\np =", round(pval7,2)))
+  g = g + theme_classic() +
+    theme(
+      axis.text.x = element_text(color="black"),
+      axis.text.y = element_text(color="black"),
+      axis.ticks = element_line(color = "black")
+    ) + xlab("FPR") + ylab("TPR") + 
+      geom_segment(aes(x = 0, xend = 1, y = 0, yend = 1), color="darkgray", linetype="dashed")
+  png(file=paste(pred_fig_dir,title_str7,".png",sep = ""),res=200,width=400, height=350) # width=700, height=600
+  print(g, newpage = FALSE)
+  dev.off()
+}
+```
+
+
+# predict ICB response by blood ICF ratios (GSE200996; Luoma et al Cell 2022)
+```{r}
+################################## Blood ICF ratio correlation with ICB ##################################
+GSE200996_blood_ICF_df2 = GSE200996_blood_ICF_df[cellsNA]
+ICFR_top = c('Memory.space.B.space.cells.minus.Regulatory.space.T.space.cells2Memory.space.B.space.cells.plus.Regulatory.space.T.space.cells', 'Memory.space.B.space.cells2Helper.space.T.space.cells', 'Memory.space.B.space.cells.minus.Regulatory.space.T.space.cells2Regulatory.space.T.space.cells.plus.Helper.space.T.space.cells')
+GSE200996_blood_ICF_df2[ICFR_top[1]] = (GSE200996_blood_ICF_df2[cellsNA[1]] - GSE200996_blood_ICF_df2[cellsNA[2]]) / (GSE200996_blood_ICF_df2[cellsNA[1]] + GSE200996_blood_ICF_df2[cellsNA[2]] + 0.000001)
+GSE200996_blood_ICF_df2[ICFR_top[2]] = (GSE200996_blood_ICF_df2[cellsNA[1]] - GSE200996_blood_ICF_df2[cellsNA[2]]) / (GSE200996_blood_ICF_df2[cellsNA[3]] + 0.000001)
+GSE200996_blood_ICF_df2[ICFR_top[3]] = (GSE200996_blood_ICF_df2[cellsNA[1]] - GSE200996_blood_ICF_df2[cellsNA[2]]) / (GSE200996_blood_ICF_df2[cellsNA[2]] + GSE200996_blood_ICF_df2[cellsNA[3]] + 0.000001)
+GSE200996_blood_ICF_df2 = GSE200996_blood_ICF_df2[ICFR_top]
+
+for (cn_i in 1:length(ICFR_top)){
+  cn = ICFR_top[cn_i]
+  cancerData=data.frame(ICB_R_df,GSE200996_blood_ICF_df2[cn])
+  cancerData2=data.frame(Vol_R_df,GSE200996_blood_ICF_df2[cn])
+  cancerData5=data.frame(pathologic_downstaging_df[['downstaging']],GSE200996_blood_ICF_df2[cn])
+  cancerData6=data.frame(Patho_R_df[['Patho_NCR']],GSE200996_blood_ICF_df2[cn])
+  cancerData7=data.frame(Patho_R_df[['Patho_minR']],GSE200996_blood_ICF_df2[cn])
+  # ICB RECIST response
+  AUC_p = roc.area(cancerData[,1], cancerData[,2])
+  auc_value = AUC_p$A
+  pval = AUC_p$p.value
+  # Volumetric response
+  AUC_p2 = roc.area(cancerData2[,1], cancerData2[,2])
+  auc_value2 = AUC_p2$A
+  pval2 = AUC_p2$p.value
+  # pathological downstaging response
+  AUC_p5 = roc.area(cancerData5[,1], cancerData5[,2])
+  auc_value5 = AUC_p5$A
+  pval5 = AUC_p5$p.value
+  # pathological near-complete response
+  AUC_p6 = roc.area(cancerData6[,1], cancerData6[,2])
+  auc_value6 = AUC_p6$A
+  pval6 = AUC_p6$p.value
+  # pathological min-response response
+  AUC_p7 = roc.area(cancerData7[,1], cancerData7[,2])
+  auc_value7 = AUC_p7$A
+  pval7 = AUC_p7$p.value
+  #print(paste(cn, round(auc_value,2), round(auc_value2,2), round(auc_value5,2), round(auc_value6,2), round(auc_value7,2)))
+  # plot ICB RECIST response ROC
+  title_str = paste0('Blood_ROC_RECIST_R_GSE200996_Top', cn_i)
+  roc_RECIST_R=roc(cancerData[,1], cancerData[,2])
+  g = ggroc(roc_RECIST_R, colour = 'black', size = 1, legacy.axes = TRUE)  +
+       annotate("text", x = .6, y = .15, label = paste("AUC =", round(roc_RECIST_R$auc[1],2), "\np =", round(pval,2)))
+  g = g + theme_classic() +
+    theme(
+      axis.text.x = element_text(color="black"),
+      axis.text.y = element_text(color="black"),
+      axis.ticks = element_line(color = "black")
+    ) + xlab("FPR") + ylab("TPR") + 
+      geom_segment(aes(x = 0, xend = 1, y = 0, yend = 1), color="darkgray", linetype="dashed")
+  png(file=paste(pred_fig_dir,title_str,".png",sep = ""),res=200,width=400, height=350) # width=700, height=600
+  print(g, newpage = FALSE)
+  dev.off()
+  # plot Volumetric response ROC
+  title_str2 = paste0('Blood_ROC_Volumetric_R_GSE200996_Top', cn_i)
+  roc_VolR=roc(cancerData2[,1], cancerData2[,2])
+  g = ggroc(roc_VolR, colour = 'black', size = 1, legacy.axes = TRUE)  +
+       annotate("text", x = .6, y = .15, label = paste("AUC =", round(roc_VolR$auc[1],2), "\np =", round(pval2,2)))
+  g = g + theme_classic() +
+    theme(
+      axis.text.x = element_text(color="black"),
+      axis.text.y = element_text(color="black"),
+      axis.ticks = element_line(color = "black")
+    ) + xlab("FPR") + ylab("TPR") + 
+      geom_segment(aes(x = 0, xend = 1, y = 0, yend = 1), color="darkgray", linetype="dashed")
+  png(file=paste(pred_fig_dir,title_str2,".png",sep = ""),res=200,width=400, height=350) # width=700, height=600
+  print(g, newpage = FALSE)
+  dev.off()
+  # plot pathological downstaging response ROC
+  title_str5 = paste0('Blood_ROC_downstaging_R_GSE200996_Top', cn_i)
+  roc_downstaging_R=roc(cancerData5[,1], cancerData5[,2]) #AUC score
+  g = ggroc(roc_downstaging_R, colour = 'black', size = 1, legacy.axes = TRUE)  +
+       annotate("text", x = .6, y = .15, label = paste("AUC =", round(roc_downstaging_R$auc[1],2), "\np =", round(pval5,2)))
+  g = g + theme_classic() +
+    theme(
+      axis.text.x = element_text(color="black"),
+      axis.text.y = element_text(color="black"),
+      axis.ticks = element_line(color = "black")
+    ) + xlab("FPR") + ylab("TPR") + 
+      geom_segment(aes(x = 0, xend = 1, y = 0, yend = 1), color="darkgray", linetype="dashed")
+  png(file=paste(pred_fig_dir,title_str5,".png",sep = ""),res=200,width=400, height=350) # width=700, height=600
+  print(g, newpage = FALSE)
+  dev.off()
+  # plot Pathological NearComplete response ROC
+  title_str6 = paste0('Blood_ROC_Pathological_NearCompleteR_GSE200996_Top', cn_i)
+  roc_Pathological_NearCompleteR=roc(cancerData6[,1], cancerData6[,2]) #AUC score
+  g = ggroc(roc_Pathological_NearCompleteR, colour = 'black', size = 1, legacy.axes = TRUE)  +
+       annotate("text", x = .6, y = .15, label = paste("AUC =", round(roc_Pathological_NearCompleteR$auc[1],2), "\np =", round(pval6,2)))
+  g = g + theme_classic() +
+    theme(
+      axis.text.x = element_text(color="black"),
+      axis.text.y = element_text(color="black"),
+      axis.ticks = element_line(color = "black")
+    ) + xlab("FPR") + ylab("TPR") + 
+      geom_segment(aes(x = 0, xend = 1, y = 0, yend = 1), color="darkgray", linetype="dashed")
+  png(file=paste(pred_fig_dir,title_str6,".png",sep = ""),res=200,width=400, height=350) # width=700, height=600
+  print(g, newpage = FALSE)
+  dev.off()
+  # plot Pathological min response ROC
+  title_str7 = paste0('Blood_ROC_Pathological_minR_GSE200996_Top', cn_i)
+  roc_Pathological_minR=roc(cancerData7[,1], cancerData7[,2]) #AUC score
+  g = ggroc(roc_Pathological_minR, colour = 'black', size = 1, legacy.axes = TRUE)  +
+       annotate("text", x = .6, y = .15, label = paste("AUC =", round(roc_Pathological_minR$auc[1],2), "\np =", round(pval7,2)))
+  g = g + theme_classic() +
+    theme(
+      axis.text.x = element_text(color="black"),
+      axis.text.y = element_text(color="black"),
+      axis.ticks = element_line(color = "black")
+    ) + xlab("FPR") + ylab("TPR") + 
+      geom_segment(aes(x = 0, xend = 1, y = 0, yend = 1), color="darkgray", linetype="dashed")
+  png(file=paste(pred_fig_dir,title_str7,".png",sep = ""),res=200,width=400, height=350) # width=700, height=600
+  print(g, newpage = FALSE)
+  dev.off()
+}
+```
+
+# predict survival by deconvoluted tumor ICF ratios (TCGA)
+```{r}
+OS_STATUS = TCGA_clinicalInfo_df$status
+OS_TIME = TCGA_clinicalInfo_df$time/30 # months
+PFS_STATUS = TCGA_clinicalInfo_df$status2
+PFS_TIME = TCGA_clinicalInfo_df$time2/30 # months
+
+TCGA_ICF_df['MemoB.minus.RegT2RegT.plus.MemoB'] = (-TCGA_ICF_df$T.cells.regulatory..Tregs. + TCGA_ICF_df$B.cells.memory)/(TCGA_ICF_df$T.cells.regulatory..Tregs.+TCGA_ICF_df$B.cells.memory+0.000001)
+TCGA_ICF_df['MemoB.minus.RegT2HelpT'] = (-TCGA_ICF_df$T.cells.regulatory..Tregs. + TCGA_ICF_df$B.cells.memory)/(TCGA_ICF_df$T.cells.follicular.helper+0.000001)
+TCGA_ICF_df['MemoB.minus.RegT2HelpT.plus.RegT'] = (-TCGA_ICF_df$T.cells.regulatory..Tregs. + TCGA_ICF_df$B.cells.memory)/(TCGA_ICF_df$T.cells.follicular.helper+TCGA_ICF_df$T.cells.regulatory..Tregs.+0.000001)
+
+cellsNA = c('MemoB.minus.RegT2RegT.plus.MemoB', 'MemoB.minus.RegT2HelpT', 'MemoB.minus.RegT2HelpT.plus.RegT')
+TCGA_ICF_df2 = TCGA_ICF_df[cellsNA]
+
+for (cn_i in 1:length(cellsNA)){
+  cn = cellsNA[cn_i]
+  Score0=TCGA_ICF_df2[cn]
+  Score_cutoff = quantile(as.matrix(Score0), 0.9) #median(as.matrix(Score0))
+  Score = Score0
+  Score[Score0>Score_cutoff]="High"
+  Score[Score0<=Score_cutoff]="Low"
+  colnames(Score) = c('Score')
+  ####################### OS associations #################################
+  cancerData=data.frame(Score,OS_TIME,OS_STATUS)
+  sfit <- survfit(Surv(OS_TIME, OS_STATUS) ~ Score, data=cancerData)
+  scox <- coxph(Surv(OS_TIME, OS_STATUS)~Score, data=cancerData)
+  scox_coef = summary(scox)$coefficients
+  HR_value = scox_coef[2] # hazard ratio
+  Z_value=scox_coef[4]
+  P_value=scox_coef[5]
+  ##### plot
+  fontSize = 13
+  N <- length(unique(Score))
+  survp=ggsurvplot(
+    sfit,
+    data = cancerData,
+    size = 1,                 # change line size
+    palette =
+      c("#E7B800", "#2E9FDF"),# custom color palettes
+    conf.int = TRUE,          # Add confidence interval
+    pval = TRUE,              # Add p-value
+    pval.coord = c(200*0.7, 0.75),
+    xlim = c(0,200),
+    ylim=c(0,1),
+    xlab = "Time in months",
+    break.time.by = 50,
+    risk.table=TRUE,
+    risk.table.height = 0.29, # Useful to change when you have multiple groups
+    risk.table.pos="out",
+    risk.table.col="black",
+    risk.table.y.text = FALSE,
+    tables.y.text = FALSE, 
+    tables.theme = theme_cleantable(),
+    legend.labs =c("High", "Low"),    # Change legend labels
+    legend.title="IGS",
+    legend = c(0.65, 1), # legend relative position
+    font.main = c(fontSize),
+    font.caption = c(fontSize),
+    font.legend = c(fontSize),
+    font.tickslab = c(fontSize),
+    font.x = c(fontSize),
+    font.y = c(fontSize),
+    ggtheme = theme_classic2(base_size=fontSize, base_family = "Arial"),
+             font.family = "Arial"
+  )+ 
+    guides(colour = guide_legend(nrow = 1)) # legend in rows
+  cn_now = paste0('Top',cn_i)
+  title_str = paste0('TCGA_OS_',cn_now)
+  png(file=paste(pred_fig_dir,title_str,".png",sep = ""),res=300,width=1100, height=900) # width=600, height=350
+  print(survp, newpage = FALSE)
+  dev.off()
+  ####################### PFS associations #################################
+  cancerData2=data.frame(Score,PFS_TIME,PFS_STATUS)
+  sfit2 <- survfit(Surv(PFS_TIME, PFS_STATUS) ~ Score, data=cancerData2)
+  scox <- coxph(Surv(PFS_TIME, PFS_STATUS)~Score, data=cancerData)
+  scox_coef = summary(scox)$coefficients
+  HR_value2 = scox_coef[2] # hazard ratio
+  Z_value2 = scox_coef[4]
+  P_value2 = scox_coef[5]
+  ##### plot
+  fontSize = 13
+  N <- length(unique(Score))
+  survp=ggsurvplot(
+    sfit2,
+    data = cancerData2,
+    size = 1,                 # change line size
+    palette =
+      c("#E7B800", "#2E9FDF"),# custom color palettes
+    conf.int = TRUE,          # Add confidence interval
+    pval = TRUE,              # Add p-value
+    pval.coord = c(200*0.7, 0.75),
+    xlim = c(0,200),
+    ylim=c(0,1),
+    xlab = "Time in months",
+    break.time.by = 50,
+    risk.table=TRUE,
+    risk.table.height = 0.29, # Useful to change when you have multiple groups
+    risk.table.pos="out",
+    risk.table.col="black",
+    risk.table.y.text = FALSE,
+    tables.y.text = FALSE, 
+    tables.theme = theme_cleantable(),
+    legend.labs =c("High", "Low"),    # Change legend labels
+    legend.title="IGS",
+    legend = c(0.65, 1), # legend relative position
+    font.main = c(fontSize),
+    font.caption = c(fontSize),
+    font.legend = c(fontSize),
+    font.tickslab = c(fontSize),
+    font.x = c(fontSize),
+    font.y = c(fontSize),
+    ggtheme = theme_classic2(base_size=fontSize, base_family = "Arial"),
+             font.family = "Arial"
+  )+ 
+    guides(colour = guide_legend(nrow = 1)) # legend in rows
+  title_str = paste0('TCGA_PFS_',cn_now)
+  png(file=paste(pred_fig_dir,title_str,".png",sep = ""),res=300,width=1100, height=900) # width=600, height=350
+  print(survp, newpage = FALSE)
+  dev.off()
+}
+```
+
+# ICB response prediction of HNSCC by TMB (AUC=0.56)
+```{r}
+#################### ICB response ###########################
+fn = './input/HNSCC_TMB_ICBR_MSK_IMPACT.csv'
+data_raw = read.csv(file = fn, header=TRUE)
+ICB_response = data_raw$Response
+Score_Pred = data_raw$TMB
+cancerData=data.frame(ICB_response,Score_Pred)
+#calculate AUC
+AUC_res = roc.area(cancerData[,1], cancerData[,2])
+auc_value = 1-AUC_res$A
+auc_pval = AUC_res$p.value
+
+print(paste('AUC_ICB: ', round(auc_value,2), sep='    '))
+#ROC-curve using pROC library
+roc_score=roc(cancerData[,1], cancerData[,2])
+g = ggroc(roc_score, colour = 'black', size = 1, legacy.axes = TRUE)  +
+     annotate("text", x = .7, y = .25, label = paste("AUC =", round(auc_value,2), "\np =", round(auc_pval,2)))
+g = g + xlab("FPR") + ylab("TPR") + 
+    geom_segment(aes(x = 0, xend = 1, y = 0, yend = 1), color="darkgray", linetype="dashed")
+title_str = 'ROC_ICB_MSK_IMPACT_TMB'
+png(file=paste(pred_fig_dir,title_str,".png",sep = ""),res=200,width=400, height=350)
+print(g, newpage = FALSE)
+dev.off()
+```
+

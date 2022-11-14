@@ -1,0 +1,31 @@
+﻿Pat. ID,hpv_status,Tumorp16status,Tumorsite,PathologicalStage,PathologicalNode,Sex,Race,Age,TobaccoUse,AlcoholUse,"Progression-free survival event (recurrence, death, new primary)",Alive and disease free at end of the follow up interval,Died ,Clinical to pathologic downstaging,RECIST response excluding non measurable,Volumetric response,Viable Tumor % post,Pathological response %,Pathological Response Bins: 0-9% response = Low; 10-49% response = Medium; 50-100% rseponse = High,Near complete/ complete response (<=10% viable tumor) ,Any response >=10% (90% or less viable tumor)  
+HNSCC2_P01,HPV_negative,p16-,Oral_cavity,T1,N2b,Male,Caucasian,55,No,Unknown,no,yes,no,NA,stable/progress,yes,NA,NA,NA,NA,NA
+HNSCC2_P02,HPV_negative,p16-,Oral_cavity,T1,N2b,Female,Caucasian,70,No,Unknown,NA,NA,NA,no,stable/progress,no,90,10,Medium,no,yes
+HNSCC2_P04,HPV_negative,p16-,Oral_cavity,T1,N2b,Female,Caucasian,43,No,Unknown,no,yes,no,yes,not measurable,no,90,10,Medium,no,yes
+HNSCC2_P05,HPV_negative,p16-,Oral_cavity,T1,N2b,Male,Caucasian,55,No,Unknown,no,yes,no,yes,not measurable,yes,5,95,High,yes,yes
+HNSCC2_P06,HPV_negative,p16-,Oral_cavity,T1,N2b,Female,Caucasian,66,Yes,Unknown,no,yes,no,yes,not measurable,no,70,30,Medium,no,yes
+HNSCC2_P07,HPV_negative,p16-,Oral_cavity,T1,N2b,Female,Caucasian,71,No,Unknown,no,yes,no,no,not measurable,no,90,10,Medium,no,yes
+HNSCC2_P08,HPV_negative,p16-,Oral_cavity,T1,N2b,Male,Caucasian,69,Yes,Unknown,no,yes,no,no,not measurable,no,95,5,Low,no,no
+HNSCC2_P09,HPV_negative,p16-,Oral_cavity,T1,N2b,Male,Caucasian,62,No,Unknown,no,yes,no,yes,not measurable,yes,20,80,High,no,yes
+HNSCC2_P10,HPV_negative,p16-,Oral_cavity,T1,N2b,Male,Caucasian,68,Yes,Unknown,yes,no,yes,no,stable/progress,no,85,15,Medium,no,yes
+HNSCC2_P12,HPV_negative,p16-,Oral_cavity,T1,N2b,Female,Caucasian,55,No,Unknown,no,yes,no,no,not measurable,yes,95,5,Low,no,no
+HNSCC2_P13,HPV_negative,p16-,Oral_cavity,T1,N2b,Male,Caucasian,32,No,Unknown,no,yes,no,yes,response,yes,0,100,High,yes,yes
+HNSCC2_P14,HPV_negative,p16-,Oral_cavity,T1,N2b,Male,Caucasian,68,Yes,Unknown,yes,yes,no,yes,stable/progress,yes,70,30,Medium,no,yes
+HNSCC2_P15,HPV_negative,p16-,Oral_cavity,T1,N2b,Female,Caucasian,66,No,Unknown,no,yes,no,yes,stable/progress,no,95,5,Low,no,no
+HNSCC2_P16,HPV_negative,p16-,Oral_cavity,T1,N2b,Male,Caucasian,78,Yes,Unknown,no,yes,no,no,not measurable,yes,95,5,Low,no,no
+HNSCC2_P17,HPV_negative,p16-,Oral_cavity,T1,N2b,Female,Caucasian,40,No,Unknown,no,yes,no,yes,response,yes,5,95,High,yes,yes
+HNSCC2_P18,HPV_negative,p16-,Oral_cavity,T1,N2b,Male,Caucasian,71,Yes,Unknown,no,yes,no,yes,not measurable,no,90,10,Medium,no,yes
+HNSCC2_P19,HPV_negative,p16-,Oral_cavity,T1,N2b,Male,Caucasian,78,No,Unknown,no,yes,no,yes,not measurable,yes,5,95,High,yes,yes
+HNSCC2_P20,HPV_negative,p16-,Oral_cavity,T1,N2b,Male,Caucasian,75,No,Unknown,no,yes,no,no,not measurable,no,95,5,Low,no,no
+HNSCC2_P21,HPV_negative,p16-,Oral_cavity,T1,N2b,Male,Caucasian,65,No,Unknown,yes,no,no,no,stable/progress,no,30,70,High,no,yes
+HNSCC2_P22,HPV_negative,p16-,Oral_cavity,T1,N2b,Female,Caucasian,57,No,Unknown,yes,yes,no,yes,not measurable,yes,80,20,Medium,no,yes
+HNSCC2_P23,HPV_negative,p16-,Oral_cavity,T1,N2b,Male,Caucasian,66,No,Unknown,no,yes,no,yes,stable/progress,no,90,10,Medium,no,yes
+HNSCC2_P24,HPV_negative,p16-,Oral_cavity,T1,N2b,Male,Caucasian,74,No,Unknown,no,yes,no,no,stable/progress,no,95,5,Low,no,no
+HNSCC2_P25,HPV_negative,p16-,Oral_cavity,T1,N2b,Male,Caucasian,51,Yes,Unknown,no,yes,no,no,stable/progress,no,95,5,Low,no,no
+HNSCC2_P26,HPV_negative,p16-,Oral_cavity,T1,N2b,Female,Caucasian,62,Yes,Unknown,yes,no,yes,yes,response,yes,90,10,Medium,no,yes
+HNSCC2_P27,HPV_negative,p16-,Oral_cavity,T1,N2b,Male,Caucasian,39,Yes,Unknown,no,yes,no,yes,stable/progress,no,95,5,Low,no,no
+HNSCC2_P28,HPV_negative,p16-,Oral_cavity,T1,N2b,Female,Caucasian,54,No,Unknown,no,yes,no,no,response,yes,85,15,Medium,no,yes
+HNSCC2_P29,HPV_negative,p16-,Oral_cavity,T1,N2b,Male,Caucasian,53,No,Unknown,no,yes,no,yes,stable/progress,yes,95,5,Low,no,no
+HNSCC2_P30,HPV_negative,p16-,Oral_cavity,T1,N2b,Female,Caucasian,63,No,Unknown,no,yes,no,yes,not measurable,yes,80,20,Medium,no,yes
+HNSCC2_P31,HPV_negative,p16-,Oral_cavity,T1,N2b,Male,Caucasian,81,No,Unknown,yes,no,yes,no,stable/progress,no,95,5,Low,no,no
+HNSCC2_P32,HPV_negative,p16-,Oral_cavity,T1,N2b,Female,Caucasian,68,No,Unknown,no,yes,no,yes,stable/progress,yes,40,60,High,no,yes
